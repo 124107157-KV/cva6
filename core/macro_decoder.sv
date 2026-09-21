@@ -53,10 +53,12 @@ module macro_decoder #(
     MVSA01
   } macro_instr_type;
 
+  localparam logic [11:0] XLEN_BYTES = CVA6Cfg.XLEN / 8;
   localparam logic [11:0] REG_OFFSET_STEP = CVA6Cfg.IS_XLEN64 ? 12'hFF8 : 12'hFFC;
 
   // Temporary registers
   logic [3:0] reg_numbers, reg_numbers_q, reg_numbers_d;
+  logic [ 4:0] stack_reg_count;
   logic [11:0] stack_adj;
   logic [4:0] xreg1, xreg2, store_reg, store_reg_q, store_reg_d;
   logic [1:0] popretz_inst_q, popretz_inst_d;
@@ -72,6 +74,7 @@ module macro_decoder #(
     is_double_rd_macro_instr_o = 1'b0;
     is_compressed_o            = is_macro_instr_i ? 1'b1 : is_compressed_i;
     reg_numbers                = '0;
+    stack_reg_count            = '0;
     stack_adj                  = '0;
     state_d                    = state_q;
     offset_d                   = offset_q;
@@ -174,102 +177,16 @@ module macro_decoder #(
         default: reg_numbers = '0;
       endcase
 
-      if (CVA6Cfg.IS_XLEN32) begin
-        unique case (instr_i[7:4])
-          4'b0100, 4'b0101, 4'b0110, 4'b0111: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 16;
-              2'b01: stack_adj = 32;
-              2'b10: stack_adj = 48;
-              2'b11: stack_adj = 64;
-            endcase
-          end
-          4'b1000, 4'b1001, 4'b1010, 4'b1011: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 32;
-              2'b01: stack_adj = 48;
-              2'b10: stack_adj = 64;
-              2'b11: stack_adj = 80;
-            endcase
-          end
-          4'b1100, 4'b1101, 4'b1110: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 48;
-              2'b01: stack_adj = 64;
-              2'b10: stack_adj = 80;
-              2'b11: stack_adj = 96;
-            endcase
-          end
-          4'b1111: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 64;
-              2'b01: stack_adj = 80;
-              2'b10: stack_adj = 96;
-              2'b11: stack_adj = 112;
-            endcase
-          end
-          default: ;
-        endcase
-      end else begin
-        unique case (instr_i[7:4])
-          4'b0100, 4'b0101: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 16;
-              2'b01: stack_adj = 32;
-              2'b10: stack_adj = 48;
-              2'b11: stack_adj = 64;
-            endcase
-          end
-          4'b0110, 4'b0111: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 32;
-              2'b01: stack_adj = 48;
-              2'b10: stack_adj = 64;
-              2'b11: stack_adj = 80;
-            endcase
-          end
-          4'b1000, 4'b1001: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 48;
-              2'b01: stack_adj = 64;
-              2'b10: stack_adj = 80;
-              2'b11: stack_adj = 96;
-            endcase
-          end
-          4'b1010, 4'b1011: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 64;
-              2'b01: stack_adj = 80;
-              2'b10: stack_adj = 96;
-              2'b11: stack_adj = 112;
-            endcase
-          end
-          4'b1100, 4'b1101: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 80;
-              2'b01: stack_adj = 96;
-              2'b10: stack_adj = 112;
-              2'b11: stack_adj = 128;
-            endcase
-          end
-          4'b1110: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 96;
-              2'b01: stack_adj = 112;
-              2'b10: stack_adj = 128;
-              2'b11: stack_adj = 144;
-            endcase
-          end
-          4'b1111: begin
-            unique case (instr_i[3:2])
-              2'b00: stack_adj = 112;
-              2'b01: stack_adj = 128;
-              2'b10: stack_adj = 144;
-              2'b11: stack_adj = 160;
-            endcase
-          end
-        endcase
-      end
+      // Compute the architectural number of saved registers.
+      // rlist=15 saves {ra,s0-s11}: 13 registers. The current FSM
+      // represents this as reg_numbers=12 and emits the additional
+      // register through PUSH_POP_INSTR_2.
+      stack_reg_count = {1'b0, reg_numbers} + ((reg_numbers == 4'd12) ? 5'd1 : 5'd0);
+
+      // Zcmp stack adjustment is the register save area rounded up to
+      // a 16-byte boundary, plus the spimm field in 16-byte units.
+      stack_adj = (((stack_reg_count * XLEN_BYTES) + 12'd15) & ~12'd15)
+                  + {6'b0, instr_i[3:2], 4'b0000};
 
       //Take 2's compliment in case of PUSH instruction
       if (macro_instr_type == PUSH) begin
