@@ -54,7 +54,7 @@ module macro_decoder #(
   } macro_instr_type;
 
   localparam logic [11:0] XLEN_BYTES = CVA6Cfg.XLEN / 8;
-  localparam logic [11:0] REG_OFFSET_STEP = CVA6Cfg.IS_XLEN64 ? 12'hFF8 : 12'hFFC;
+  localparam logic [2:0] MEM_FUNCT3 = CVA6Cfg.IS_XLEN32 ? 3'b010 : 3'b011;
 
   // Temporary registers
   logic [3:0] reg_numbers, reg_numbers_q, reg_numbers_d;
@@ -78,6 +78,7 @@ module macro_decoder #(
     stack_adj                  = '0;
     state_d                    = state_q;
     offset_d                   = offset_q;
+    offset_reg                 = '0;
     reg_numbers_d              = reg_numbers_q;
     store_reg_d                = store_reg_q;
     popretz_inst_d             = popretz_inst_q;
@@ -192,7 +193,7 @@ module macro_decoder #(
       if (macro_instr_type == PUSH) begin
         itype_inst.imm = ~stack_adj + 1'b1;
       end else begin
-        itype_inst.imm = stack_adj + REG_OFFSET_STEP;
+        itype_inst.imm = stack_adj - XLEN_BYTES;
       end
     end else begin
       illegal_instr_o = illegal_instr_i;
@@ -206,11 +207,12 @@ module macro_decoder #(
           state_d = issue_ack_i ? INIT : IDLE;
           case (macro_instr_type)
             PUSH: begin
-              offset_d = REG_OFFSET_STEP + REG_OFFSET_STEP;
+              offset_reg = -XLEN_BYTES;
+              offset_d   = -(2 * XLEN_BYTES);
             end
             POP, POPRETZ, POPRET: begin
-              offset_d   = itype_inst.imm + REG_OFFSET_STEP;
               offset_reg = itype_inst.imm;
+              offset_d   = itype_inst.imm - XLEN_BYTES;
               case (macro_instr_type)
                 POPRETZ: begin
                   popretz_inst_d = 2'b11;
@@ -260,43 +262,31 @@ module macro_decoder #(
             fetch_stall_o = 1'b1;  // stall inst fetch
 
             if (reg_numbers == 4'b0001) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {
-                  7'b1111111, 5'h1, 5'h2, 3'h3, 5'b11000, riscv::OpcodeStore
-                };  // sd store_reg, -8(sp)
-              end else begin
-                instr_o_reg = {
-                  7'b1111111, 5'h1, 5'h2, 3'h2, 5'b11100, riscv::OpcodeStore
-                };  // sw store_reg, -4(sp)
-              end
+              instr_o_reg = {
+                offset_reg[11:5], 5'h1, 5'h2, MEM_FUNCT3, offset_reg[4:0], riscv::OpcodeStore
+              };
               if (issue_ack_i) begin
                 state_d = PUSH_ADDI;
               end
             end
 
             if (reg_numbers == 4'b0010) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {7'b1111111, 5'h8, 5'h2, 3'h3, 5'b11000, riscv::OpcodeStore};
-              end else begin
-                instr_o_reg = {7'b1111111, 5'h8, 5'h2, 3'h2, 5'b11100, riscv::OpcodeStore};
-              end
+              instr_o_reg = {
+                offset_reg[11:5], 5'h8, 5'h2, MEM_FUNCT3, offset_reg[4:0], riscv::OpcodeStore
+              };
             end
 
             if (reg_numbers == 4'b0011) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {7'b1111111, 5'h9, 5'h2, 3'h3, 5'b11000, riscv::OpcodeStore};
-              end else begin
-                instr_o_reg = {7'b1111111, 5'h9, 5'h2, 3'h2, 5'b11100, riscv::OpcodeStore};
-              end
+              instr_o_reg = {
+                offset_reg[11:5], 5'h9, 5'h2, MEM_FUNCT3, offset_reg[4:0], riscv::OpcodeStore
+              };
 
             end
 
             if (reg_numbers >= 4 && reg_numbers <= 12) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {7'b1111111, store_reg, 5'h2, 3'h3, 5'b11000, riscv::OpcodeStore};
-              end else begin
-                instr_o_reg = {7'b1111111, store_reg, 5'h2, 3'h2, 5'b11100, riscv::OpcodeStore};
-              end
+              instr_o_reg = {
+                offset_reg[11:5], store_reg, 5'h2, MEM_FUNCT3, offset_reg[4:0], riscv::OpcodeStore
+              };
 
               if (reg_numbers == 12 && issue_ack_i) begin
                 state_d = PUSH_POP_INSTR_2;
@@ -307,15 +297,7 @@ module macro_decoder #(
           if ((macro_instr_type == POP || macro_instr_type == POPRETZ || macro_instr_type == POPRET)) begin
             fetch_stall_o = 1;  // stall inst fetch
             if (reg_numbers == 1) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {
-                  offset_reg, 5'h2, 3'h3, 5'h1, riscv::OpcodeLoad
-                };  // ld store_reg, Imm(sp)
-              end else begin
-                instr_o_reg = {
-                  offset_reg, 5'h2, 3'h2, 5'h1, riscv::OpcodeLoad
-                };  // lw store_reg, Imm(sp)
-              end
+              instr_o_reg = {offset_reg, 5'h2, MEM_FUNCT3, 5'h1, riscv::OpcodeLoad};
               if (issue_ack_i) begin
                 unique case (macro_instr_type)
                   PUSH, POP, POPRET: begin
@@ -330,27 +312,15 @@ module macro_decoder #(
             end
 
             if (reg_numbers == 2) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h3, 5'h8, riscv::OpcodeLoad};
-              end else begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h2, 5'h8, riscv::OpcodeLoad};
-              end
+              instr_o_reg = {offset_reg, 5'h2, MEM_FUNCT3, 5'h8, riscv::OpcodeLoad};
             end
 
             if (reg_numbers == 3) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h3, 5'h9, riscv::OpcodeLoad};
-              end else begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h2, 5'h9, riscv::OpcodeLoad};
-              end
+              instr_o_reg = {offset_reg, 5'h2, MEM_FUNCT3, 5'h9, riscv::OpcodeLoad};
             end
 
             if (reg_numbers >= 4 && reg_numbers <= 12) begin
-              if (CVA6Cfg.IS_XLEN64) begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h3, store_reg, riscv::OpcodeLoad};
-              end else begin
-                instr_o_reg = {offset_reg, 5'h2, 3'h2, store_reg, riscv::OpcodeLoad};
-              end
+              instr_o_reg = {offset_reg, 5'h2, MEM_FUNCT3, store_reg, riscv::OpcodeLoad};
 
               if (reg_numbers == 12 && issue_ack_i) begin
                 state_d = PUSH_POP_INSTR_2;
@@ -363,47 +333,35 @@ module macro_decoder #(
         fetch_stall_o = is_macro_instr_i;  // stall inst fetch
         if (issue_ack_i && is_macro_instr_i && macro_instr_type == PUSH) begin
           if (reg_numbers_q == 4'b0001) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:5], 5'h1, 5'h2, 3'h3, offset_d[4:0], riscv::OpcodeStore};
-            end else begin
-              instr_o_reg = {offset_d[11:5], 5'h1, 5'h2, 3'h2, offset_d[4:0], riscv::OpcodeStore};
-            end
+            instr_o_reg = {
+              offset_d[11:5], 5'h1, 5'h2, MEM_FUNCT3, offset_d[4:0], riscv::OpcodeStore
+            };
             state_d = PUSH_ADDI;
           end
 
           if (reg_numbers_q == 4'b0010) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:5], 5'h8, 5'h2, 3'h3, offset_d[4:0], riscv::OpcodeStore};
-            end else begin
-              instr_o_reg = {offset_d[11:5], 5'h8, 5'h2, 3'h2, offset_d[4:0], riscv::OpcodeStore};
-            end
+            instr_o_reg = {
+              offset_d[11:5], 5'h8, 5'h2, MEM_FUNCT3, offset_d[4:0], riscv::OpcodeStore
+            };
             reg_numbers_d = reg_numbers_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;  // decrement offset by one register slot
+            offset_d = offset_q - XLEN_BYTES;  // decrement offset by one register slot
           end
 
           if (reg_numbers_q == 4'b0011) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:5], 5'h9, 5'h2, 3'h3, offset_d[4:0], riscv::OpcodeStore};
-            end else begin
-              instr_o_reg = {offset_d[11:5], 5'h9, 5'h2, 3'h2, offset_d[4:0], riscv::OpcodeStore};
-            end
+            instr_o_reg = {
+              offset_d[11:5], 5'h9, 5'h2, MEM_FUNCT3, offset_d[4:0], riscv::OpcodeStore
+            };
             reg_numbers_d = reg_numbers_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;
+            offset_d = offset_q - XLEN_BYTES;
           end
 
           if (reg_numbers_q >= 4 && reg_numbers_q <= 12) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {
-                offset_d[11:5], store_reg_q, 5'h2, 3'h3, offset_d[4:0], riscv::OpcodeStore
-              };
-            end else begin
-              instr_o_reg = {
-                offset_d[11:5], store_reg_q, 5'h2, 3'h2, offset_d[4:0], riscv::OpcodeStore
-              };
-            end
+            instr_o_reg = {
+              offset_d[11:5], store_reg_q, 5'h2, MEM_FUNCT3, offset_d[4:0], riscv::OpcodeStore
+            };
             reg_numbers_d = reg_numbers_q - 1;
             store_reg_d = store_reg_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;
+            offset_d = offset_q - XLEN_BYTES;
             if (reg_numbers_q == 12) begin
               state_d = PUSH_POP_INSTR_2;
             end
@@ -413,11 +371,7 @@ module macro_decoder #(
         if (issue_ack_i && is_macro_instr_i && (macro_instr_type == POP || macro_instr_type == POPRETZ || macro_instr_type == POPRET)) begin
 
           if (reg_numbers_q == 1) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h3, 5'h1, riscv::OpcodeLoad};
-            end else begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h2, 5'h1, riscv::OpcodeLoad};
-            end
+            instr_o_reg = {offset_d[11:0], 5'h2, MEM_FUNCT3, 5'h1, riscv::OpcodeLoad};
             unique case (macro_instr_type)
               PUSH, POP, POPRET: begin
                 state_d = PUSH_ADDI;
@@ -430,34 +384,22 @@ module macro_decoder #(
           end
 
           if (reg_numbers_q == 2) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h3, 5'h8, riscv::OpcodeLoad};
-            end else begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h2, 5'h8, riscv::OpcodeLoad};
-            end
+            instr_o_reg = {offset_d[11:0], 5'h2, MEM_FUNCT3, 5'h8, riscv::OpcodeLoad};
             reg_numbers_d = reg_numbers_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;  // decrement offset by one register slot
+            offset_d = offset_q - XLEN_BYTES;  // decrement offset by one register slot
           end
 
           if (reg_numbers_q == 3) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h3, 5'h9, riscv::OpcodeLoad};
-            end else begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h2, 5'h9, riscv::OpcodeLoad};
-            end
+            instr_o_reg = {offset_d[11:0], 5'h2, MEM_FUNCT3, 5'h9, riscv::OpcodeLoad};
             reg_numbers_d = reg_numbers_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;
+            offset_d = offset_q - XLEN_BYTES;
           end
 
           if (reg_numbers_q >= 4 && reg_numbers_q <= 12) begin
-            if (CVA6Cfg.IS_XLEN64) begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h3, store_reg_q, riscv::OpcodeLoad};
-            end else begin
-              instr_o_reg = {offset_d[11:0], 5'h2, 3'h2, store_reg_q, riscv::OpcodeLoad};
-            end
+            instr_o_reg = {offset_d[11:0], 5'h2, MEM_FUNCT3, store_reg_q, riscv::OpcodeLoad};
             reg_numbers_d = reg_numbers_q - 1;
             store_reg_d = store_reg_q - 1;
-            offset_d = offset_q + REG_OFFSET_STEP;
+            offset_d = offset_q - XLEN_BYTES;
             if (reg_numbers_q == 12) begin
               state_d = PUSH_POP_INSTR_2;
             end
@@ -495,103 +437,53 @@ module macro_decoder #(
       end
 
       PUSH_ADDI: begin
-        if (CVA6Cfg.IS_XLEN64) begin
-          if (issue_ack_i && is_macro_instr_i && macro_instr_type == PUSH) begin
-            // addi sp, sp, stack_adj
-            instr_o_reg = {itype_inst.imm, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
-          end else begin
-            if (issue_ack_i) begin
-              instr_o_reg = {stack_adj, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
-            end
-          end
-          if (issue_ack_i && is_macro_instr_i && (macro_instr_type == POPRETZ || macro_instr_type == POPRET)) begin
-            state_d = POPRETZ_1;
-            fetch_stall_o = 1;
-          end else begin
-            if (issue_ack_i) begin
-              state_d = IDLE;
-              fetch_stall_o = 0;
-              is_last_macro_instr_o = 1;
-            end else begin
-              fetch_stall_o = 1;
-            end
-          end
+        if (issue_ack_i && is_macro_instr_i && macro_instr_type == PUSH) begin
+          // addi sp, sp, stack_adj
+          instr_o_reg = {itype_inst.imm, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
         end else begin
-          if (issue_ack_i && is_macro_instr_i && macro_instr_type == PUSH) begin
-            // addi sp, sp, stack_adj
-            instr_o_reg = {itype_inst.imm, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
-          end else begin
-            if (issue_ack_i) begin
-              instr_o_reg = {stack_adj, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
-            end
+          if (issue_ack_i) begin
+            instr_o_reg = {stack_adj, 5'h2, 3'h0, 5'h2, riscv::OpcodeOpImm};
           end
-          if (issue_ack_i && is_macro_instr_i && (macro_instr_type == POPRETZ || macro_instr_type == POPRET)) begin
-            state_d = POPRETZ_1;
-            fetch_stall_o = 1;
+        end
+        if (issue_ack_i && is_macro_instr_i && (macro_instr_type == POPRETZ || macro_instr_type == POPRET)) begin
+          state_d = POPRETZ_1;
+          fetch_stall_o = 1;
+        end else begin
+          if (issue_ack_i) begin
+            state_d = IDLE;
+            fetch_stall_o = 0;
+            is_last_macro_instr_o = 1;
           end else begin
-            if (issue_ack_i) begin
-              state_d = IDLE;
-              fetch_stall_o = 0;
-              is_last_macro_instr_o = 1;
-            end else begin
-              fetch_stall_o = 1;
-            end
+            fetch_stall_o = 1;
           end
         end
       end
 
       PUSH_POP_INSTR_2: begin
-        if (CVA6Cfg.IS_XLEN64) begin
-          case (macro_instr_type)
-            PUSH: begin
-              if (issue_ack_i) begin
-                instr_o_reg = {
-                  offset_d[11:5], store_reg_q, 5'h2, 3'h3, offset_d[4:0], riscv::OpcodeStore
-                };
-                offset_d = offset_q + REG_OFFSET_STEP;
-                store_reg_d = store_reg_q - 1;
-                state_d = INIT;
-              end
+        case (macro_instr_type)
+          PUSH: begin
+            if (issue_ack_i) begin
+              instr_o_reg = {
+                offset_d[11:5], store_reg_q, 5'h2, MEM_FUNCT3, offset_d[4:0], riscv::OpcodeStore
+              };
+              offset_d = offset_q - XLEN_BYTES;
+              store_reg_d = store_reg_q - 1;
+              state_d = INIT;
             end
-            POP, POPRETZ, POPRET: begin
-              if (issue_ack_i) begin
-                instr_o_reg = {offset_d[11:0], 5'h2, 3'h3, store_reg_q, riscv::OpcodeLoad};
-                offset_d = offset_q + REG_OFFSET_STEP;
-                store_reg_d = store_reg_q - 1;
-                state_d = INIT;
-              end
+          end
+          POP, POPRETZ, POPRET: begin
+            if (issue_ack_i) begin
+              instr_o_reg = {offset_d[11:0], 5'h2, MEM_FUNCT3, store_reg_q, riscv::OpcodeLoad};
+              offset_d = offset_q - XLEN_BYTES;
+              store_reg_d = store_reg_q - 1;
+              state_d = INIT;
             end
-            default: begin
-              illegal_instr_o = 1'b1;
-              instr_o_reg     = instr_i;
-            end
-          endcase
-        end else begin
-          case (macro_instr_type)
-            PUSH: begin
-              if (issue_ack_i) begin
-                instr_o_reg = {
-                  offset_d[11:5], store_reg_q, 5'h2, 3'h2, offset_d[4:0], riscv::OpcodeStore
-                };
-                offset_d = offset_q + REG_OFFSET_STEP;
-                store_reg_d = store_reg_q - 1;
-                state_d = INIT;
-              end
-            end
-            POP, POPRETZ, POPRET: begin
-              if (issue_ack_i) begin
-                instr_o_reg = {offset_d[11:0], 5'h2, 3'h2, store_reg_q, riscv::OpcodeLoad};
-                offset_d = offset_q + REG_OFFSET_STEP;
-                store_reg_d = store_reg_q - 1;
-                state_d = INIT;
-              end
-            end
-            default: begin
-              illegal_instr_o = 1'b1;
-              instr_o_reg     = instr_i;
-            end
-          endcase
-        end
+          end
+          default: begin
+            illegal_instr_o = 1'b1;
+            instr_o_reg     = instr_i;
+          end
+        endcase
         fetch_stall_o = 1;
       end
 
